@@ -1,0 +1,215 @@
+const baileys = require("@whiskeysockets/baileys");
+const makeWASocket = baileys.default;
+const { useMultiFileAuthState, fetchLatestBaileysVersion } = baileys;
+const qrcode = require("qrcode-terminal");
+
+// ===== OWNER / SUDO CONFIG =====
+
+// Tumhara number (owner)
+const OWNER_NUMBER = "639272983162";
+const OWNER_JID = OWNER_NUMBER + "@s.whatsapp.net";
+
+// Sudo list (runtime me memory me rahega)
+let sudoUsers = new Set([OWNER_JID]);
+
+// Emoji list NC ke liye
+const EMOJIS = ['😈','👺','💀','🔥','🤡','🥵','💣','👻','🧨','🖕','🤬','😡','😹','☠️','🪓','👾','🫨','🐷'];
+let emojiIndex = 0;
+function nextEmoji() {
+  const e = EMOJIS[emojiIndex];
+  emojiIndex = (emojiIndex + 1) % EMOJIS.length;
+  return e;
+}
+
+// Convert number to JID
+function jidFromNumber(num) {
+  const digits = (num || "").replace(/[^0-9]/g, "");
+  if (!digits) return null;
+  return digits + "@s.whatsapp.net";
+}
+
+// Check sudo
+function isSudo(jid) {
+  return jid === OWNER_JID || sudoUsers.has(jid);
+}
+
+// ===== COMMAND HANDLER =====
+function setupCommandHandler(sock) {
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    for (const msg of messages) {
+      try {
+        if (!msg.message) continue;
+
+        const from = msg.key.remoteJid;
+        const sender = msg.key.participant || msg.key.remoteJid;
+        const isGroup = from.endsWith("@g.us");
+        const isFromMe = msg.key.fromMe;
+        if (!isGroup || isFromMe) continue;
+
+        const text =
+          msg.message.conversation ||
+          msg.message.extendedTextMessage?.text ||
+          msg.message.imageMessage?.caption ||
+          "";
+
+        if (!text) continue;
+        const body = text.trim();
+        const lower = body.toLowerCase();
+
+        // ========== .ping ==========
+        if (lower === ".ping") {
+          if (!isSudo(sender)) return;
+          await sock.sendMessage(
+            from,
+            {
+              text:
+                "🟢 Bot chal raha hai!\n📱 Phone connected hai!\n🔥 Sab set!",
+            },
+            { quoted: msg }
+          );
+          continue;
+        }
+
+        // ========== /NC text ==========
+        if (lower.startsWith("/nc")) {
+          if (!isSudo(sender)) return;
+
+          const afterCmd = body.slice(3).trim();
+          if (!afterCmd) {
+            await sock.sendMessage(from, { text: "Example:\n/NC SIN BOT OP 😈" }, { quoted: msg });
+            continue;
+          }
+
+          const newTitle = `${afterCmd} ${nextEmoji()}`;
+
+          try {
+            await sock.groupUpdateSubject(from, newTitle);
+            await sock.sendMessage(
+              from,
+              { text: `⭐ NC set: *${newTitle}*` },
+              { quoted: msg }
+            );
+          } catch (err) {
+            await sock.sendMessage(from, { text: "❌ Admin rights required!" }, { quoted: msg });
+          }
+          continue;
+        }
+
+        // ========== .addsudo ==========
+        if (lower.startsWith(".addsudo")) {
+          if (!isSudo(sender)) return;
+
+          let targetJid = null;
+          const parts = body.split(/\s+/);
+
+          if (parts[1]) {
+            targetJid = jidFromNumber(parts[1]);
+          } else {
+            const ctx = msg.message.extendedTextMessage?.contextInfo;
+            if (ctx?.participant) {
+              targetJid = ctx.participant;
+            }
+          }
+
+          if (!targetJid) {
+            await sock.sendMessage(
+              from,
+              { text: "Use: .addsudo <number>  या जिसको sudo करना है उसके msg पर reply करके .addsudo" },
+              { quoted: msg }
+            );
+            return;
+          }
+
+          if (targetJid === OWNER_JID) {
+            await sock.sendMessage(from, { text: "Owner to already sudo है 😼" }, { quoted: msg });
+            return;
+          }
+
+          sudoUsers.add(targetJid);
+          await sock.sendMessage(
+            from,
+            {
+              text: `✅ Sudo add: @${targetJid.split("@")[0]}`,
+              mentions: [targetJid],
+            },
+            { quoted: msg }
+          );
+          continue;
+        }
+
+        // ========== .delsudo ==========
+        if (lower.startsWith(".delsudo") || lower.startsWith(".rmsudo")) {
+          if (!isSudo(sender)) return;
+
+          let targetJid = null;
+          const parts = body.split(/\s+/);
+
+          if (parts[1]) {
+            targetJid = jidFromNumber(parts[1]);
+          } else {
+            const ctx = msg.message.extendedTextMessage?.contextInfo;
+            if (ctx?.participant) {
+              targetJid = ctx.participant;
+            }
+          }
+
+          if (!targetJid) {
+            await sock.sendMessage(
+              from,
+              { text: "Use: .delsudo <number>  या reply करके .delsudo" },
+              { quoted: msg }
+            );
+            return;
+          }
+
+          sudoUsers.delete(targetJid);
+          await sock.sendMessage(
+            from,
+            {
+              text: `🗑️ Sudo हटाया: @${targetJid.split("@")[0]}`,
+              mentions: [targetJid],
+            },
+            { quoted: msg }
+          );
+          continue;
+        }
+      } catch (err) {
+        console.log("Error:", err);
+      }
+    }
+  });
+}
+
+// ===== MAIN CONNECTION =====
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info");
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    printQRInTerminal: true,
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("connection.update", (update) => {
+    const { connection, qr } = update;
+
+    if (qr) {
+      console.log("📲 WhatsApp में जाकर Linked Devices → Scan QR");
+      qrcode.generate(qr, { small: true });
+    }
+
+    if (connection === "open") {
+      console.log("✅ Bot connected!");
+      setupCommandHandler(sock);
+    }
+
+    if (connection === "close") {
+      console.log("❌ Connection closed. Bot restart करो.");
+    }
+  });
+}
+
+startBot();
